@@ -5,15 +5,23 @@ from tavily import TavilyClient
 import sqlite3
 import asyncio
 import logging
-import unicodedata
 import os
+import base64
+import aiohttp
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ================= 設定エリア =================
-MIMO_API_KEY = os.getenv("MIMO_API_KEY", "Your API")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "Your API")
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "Your API")
-DB_NAME = os.getenv("DB_NAME", "mimo_bot.db")
-MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2-flash")
+MIMO_API_KEY = os.getenv("MIMO_API_KEY", "")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
+DB_NAME = os.getenv("DB_NAME", os.path.join(BASE_DIR, "mimo_bot.db"))
+TEST_GUILD_ID = 0
+
+MIMO_MODEL = os.getenv("MIMO_MODEL", "mimo-v2.5")
+
+#以下をTrueにすると検索するか、しないかの判断を表示するデバッグ機能です。
+DEBUG_SHOW_SEARCH_DECISION = False
 # =============================================
 
 # ロギング設定
@@ -24,25 +32,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ベースとなるアイデンティティ
 BASE_IDENTITY = f"""
+Please speak in Japanese unless otherwise instructed by the user.
 Your name is "Mimo(ミモ)"
-The model you are using is "{MIMO_MODEL}," and this bot was created by [ @hurisan_2006 ].
-The model you are using is "{MIMO_MODEL}," and you are a humorous and friendly AI created by [ @hurisan_2006 ].
+The model you are using is "{MIMO_MODEL}", and you are a humorous and friendly AI created by [ @hurisan_2006 ].
 You are not just an AI that explains things; you are a conversational AI aimed at enjoying dialogue.
 Connect with the user in a friendly way, and instead of just giving short answers, ask questions back and provide follow-ups to keep the conversation going.
 Your tone should be friendly and polite, and you should mix in light small talk when necessary.
 Powered by mimo (Xiaomi)
+
 [Code of Conduct]
-Interact with the user with the closeness of a "friend," and speak frankly, using little to no honorifics.
+Interact with the user with the closeness of a "friend", and speak frankly, using little to no honorifics.
 You enjoy conversations mixed with jokes and humor. If you can provide a funny response, do so actively.
 In situations where an explanation is needed, avoid technical jargon and explain things in an easy-to-understand, broken-down way.
-Beyond just "explaining," empathize with the user's emotions and enjoy small talk.
+Beyond just "explaining", empathize with the user's emotions and enjoy small talk.
 If the user speaks in a language other than Japanese, such as English or Chinese, respond in the same language they used to address you.
 """
 
 # クライアント初期化
 mimo_client = AsyncOpenAI(api_key=MIMO_API_KEY, base_url="https://api.xiaomimimo.com/v1")
 tavily = TavilyClient(api_key=TAVILY_API_KEY)
+
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -52,6 +63,28 @@ server_settings_cache = {}
 history_cache = {}
 running_tasks = {}
 _emergency_stop = False
+
+# ================= ユーティリティ機能 =================
+async def download_and_encode_image(url):
+    """Discordの画像URLからBase64エンコードされた文字列を取得する"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    img_data = await resp.read()
+                    return base64.b64encode(img_data).decode('utf-8')
+    except Exception as e:
+        logger.error(f"画像ダウンロードエラー: {e}")
+    return None
+
+def search_with_tavily(query):
+    try:
+        response = tavily.search(query=query, search_depth="basic", max_results=3)
+        results = [f"出典: [{r['url']}]({r['url']})\n{r['content']}" for r in response.get('results', [])]
+        return "\n\n".join(results) if results else ""
+    except Exception as e:
+        logger.error(f"Tavily検索エラー: {e}")
+        return ""
 
 # ================= データベース機能 =================
 def get_db():
@@ -72,20 +105,19 @@ def init_db():
         cur.execute("""
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_id TEXT,
+            conv_key TEXT,
             role TEXT,
             content TEXT
         )
         """)
         conn.commit()
-    logger.info("データベース初期化完了")
+        logger.info("データベース初期化完了")
 
 def update_setting(guild_id, channel_id=None, instruction=None):
     gid = str(guild_id)
     curr_channel, curr_instr = get_server_settings(guild_id)
     curr_channel = channel_id or curr_channel
     curr_instr = instruction or curr_instr
-
     with get_db() as conn:
         conn.execute("INSERT OR REPLACE INTO server_settings VALUES (?, ?, ?)", 
                      (gid, str(curr_channel), curr_instr))
@@ -99,192 +131,61 @@ def get_server_settings(guild_id):
         return server_settings_cache[gid]
     with get_db() as conn:
         row = conn.execute("SELECT channel_id, instruction FROM server_settings WHERE guild_id = ?", (gid,)).fetchone()
+        result = (row[0], row[1]) if row else (None, "フレンドリーで楽しい会話を心がけてください。")
+        server_settings_cache[gid] = result
+        return result
 
-    result = (row[0], row[1]) if row else (None, "フレンドリーで楽しい会話を心がけてください。")
-    server_settings_cache[gid] = result
-    return result
-
-def add_history(channel_id, role, content):
-    cid = str(channel_id)
+def add_history(conv_key, role, content):
     with get_db() as conn:
-        conn.execute("INSERT INTO history (channel_id, role, content) VALUES (?, ?, ?)", (cid, role, content))
+        conn.execute("INSERT INTO history (conv_key, role, content) VALUES (?, ?, ?)", (conv_key, role, content))
         conn.execute("""
         DELETE FROM history WHERE id IN (
-            SELECT id FROM history WHERE channel_id = ? ORDER BY id DESC LIMIT -1 OFFSET 10
+            SELECT id FROM history WHERE conv_key = ? ORDER BY id DESC LIMIT -1 OFFSET 10
         )
-        """, (cid,))
+        """, (conv_key,))
         conn.commit()
-    if cid not in history_cache:
-        history_cache[cid] = []
-    history_cache[cid].append({"role": role, "content": content})
-    if len(history_cache[cid]) > 10:
-        history_cache[cid].pop(0)
+    if conv_key not in history_cache:
+        history_cache[conv_key] = []
+    history_cache[conv_key].append({"role": role, "content": content})
+    if len(history_cache[conv_key]) > 10:
+        history_cache[conv_key].pop(0)
 
-def get_history(channel_id):
-    cid = str(channel_id)
-    if cid in history_cache:
-        return history_cache[cid]
+def get_history(conv_key):
+    if conv_key in history_cache:
+        return history_cache[conv_key]
     with get_db() as conn:
-        rows = conn.execute("SELECT role, content FROM history WHERE channel_id = ? ORDER BY id ASC", (cid,)).fetchall()
+        rows = conn.execute("SELECT role, content FROM history WHERE conv_key = ? ORDER BY id ASC", (conv_key,)).fetchall()
+        history = [{"role": r[0], "content": r[1]} for r in rows]
+        history_cache[conv_key] = history
+        return history
 
-    history = [{"role": r[0], "content": r[1]} for r in rows]
-    history_cache[cid] = history
-    return history
-
-def clear_history(channel_id):
-    cid = str(channel_id)
+def clear_history(conv_key):
     with get_db() as conn:
-        conn.execute("DELETE FROM history WHERE channel_id = ?", (cid,))
+        conn.execute("DELETE FROM history WHERE conv_key = ?", (conv_key,))
         conn.commit()
-    history_cache.pop(cid, None)
-
-# ================= ユーティリティ機能 =================
-def get_display_width(text: str) -> int:
-    width = 0
-    for char in str(text):
-        if unicodedata.east_asian_width(char) in ('F', 'W'):
-            width += 2
-        else:
-            width += 1
-    return width
-
-def pad_to_display_width(text: str, target_width: int) -> str:
-    text = str(text)
-    current_width = get_display_width(text)
-    if current_width >= target_width:
-        return text
-    return text + ' ' * (target_width - current_width)
-
-def generate_ascii_table(text: str) -> str:
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    if not lines:
-        return "(表の入力が空です)"
-    delim = ", "
-    if any("| " in l for l in lines):
-        delim = "| "
-        
-    rows = [[c.strip() for c in ln.split(delim)] for ln in lines]
-    max_cols = max(len(r) for r in rows) if rows else 0
-    if max_cols == 0:
-        return "(有効な行がありません) "
-        
-    for r in rows:
-        r.extend(["  "] * (max_cols - len(r)))
-        
-    col_widths = [max(get_display_width(str(r[i])) for r in rows) for i in range(max_cols)]
-    col_widths = [max(w, 1) for w in col_widths]
-
-    def sep_line(): 
-        return "+ " + "+ ".join(["-" * (w + 2) for w in col_widths]) + "+"
-        
-    def format_row(r):
-        cells = [f"  {pad_to_display_width(str(r[i]), col_widths[i])}   " for i in range(max_cols)]
-        return "| " + "| ".join(cells) + "|"
-        
-    out = [sep_line()]
-    for idx, r in enumerate(rows):
-        out.append(format_row(r))
-        if idx == 0:
-            out.append(sep_line())
-    out.append(sep_line())
-    return "\n".join(out)
-
-def convert_ai_tables(text: str) -> str:
-    lines = text.splitlines()
-    out_lines = []
-    i = 0
-    in_code = False
-    while i < len(lines):
-        line = lines[i]
-        if line.strip().startswith("`"):
-            in_code = not in_code
-            out_lines.append(line)
-            i += 1
-            continue
-        if in_code:
-            out_lines.append(line)
-            i += 1
-            continue
-            
-        is_table_line = ("| " in line and line.count("| ") >= 2) or (", " in line and line.count(", ") >= 1)
-        if is_table_line:
-            j = i
-            block = []
-            while j < len(lines):
-                tmp = lines[j]
-                if ("| " in tmp and tmp.count("| ") >= 2) or (", " in tmp and tmp.count(", ") >= 1):
-                    block.append(tmp)
-                    j += 1
-                else:
-                    break
-                    
-            if len(block) >= 2:
-                delim = "| " if any("| " in b for b in block) else ", "
-                payload = []
-                for b in block:
-                    if delim == "| ":
-                        parts = [p.strip() for p in b.split("| ") if p.strip()]
-                    else:
-                        parts = [p.strip() for p in b.split(",")]
-                    payload.append(", ".join(parts))
-                ascii_tbl = generate_ascii_table("\n".join(payload))
-                out_lines.append("```")
-                out_lines.extend(ascii_tbl.splitlines())
-                out_lines.append("```")
-                i = j
-                continue
-        out_lines.append(line)
-        i += 1
-    return "\n".join(out_lines)
-
-def search_with_tavily(query):
-    try:
-        response = tavily.search(query=query, search_depth="basic", max_results=3)
-        results = [f"【出典: {r['url']}】\n{r['content']}" for r in response.get('results', [])]
-        return "\n\n".join(results) if results else ""
-    except Exception as e:
-        logger.error(f"Tavily検索エラー: {e}")
-        return ""
+    history_cache.pop(conv_key, None)
 
 # ================= スラッシュコマンド =================
 @bot.tree.command(name="help", description="🤖 Botの操作マニュアルを表示します")
 async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(title="🤖 Mimo Bot 操作マニュアル", color=0x3498db)
-    embed.add_field(name="✨ 基本機能", value="設定チャンネルでMiMoAiがあなたの質問・会話にお答えします。", inline=False)
+    embed.add_field(name="✨ 基本機能", value="設定チャンネルでMiMoAiがあなたの質問・会話にお答えします。\n**画像の送信にも対応しました！**", inline=False)
     embed.add_field(name="📡 一般ユーザー向け", value="`/reset` — 会話履歴リセット\n`/stop` — 応答中断\n`/privacy` — プライバシーポリシー表示", inline=False)
     embed.add_field(name="🛠️ 管理者向け", value="`/setchannel` — AI専用チャンネル設定\n`/stopall` — 全応答強制停止", inline=False)
     embed.set_footer(text="Developer: @hurisan_2006")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="privacy", description="🛡️ プライバシーポリシーを表示します")
-async def privacy_cmd(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🛡️ MiMoBot プライバシーポリシー", 
-        color=0x2ecc71, 
-        description="最終更新日: 2026年5月29日\n\n本Botはユーザーのプライバシーとデータの透明性を最優先に設計されています。"
-    )
-    embed.add_field(name="📦 1. 収集するデータ", value="• 会話履歴（メッセージ内容・応答テキスト）\n• 識別情報（サーバーID・チャンネルID・ユーザーID）\n• サーバー設定（専用チャンネル・カスタム指示）\n※認証情報は環境変数として扱い、ユーザーデータとして保存しません。", inline=False)
-    embed.add_field(name="🔒 2. データの保管とセキュリティ", value="収集データは実行環境内の**SQLiteデータベースにのみ保存**されます。\n外部クラウド・サードパーティDBには一切送信されません。", inline=False)
-    embed.add_field(name="🤝 3. 第三者への共有について", value="第三者への共有・販売・提供は**一切行いません**。\nAI応答生成時にXiaomi Mimo APIおよびTavily APIへ一時的に送信されますが、各サービスのプライバシーポリシーに準拠して処理されます。", inline=False)
-    embed.add_field(name="🧑‍💻 4. 開発者によるアクセス", value="開発者は保存された会話履歴や個人データを**閲覧・アクセス・分析することはありません**。データは完全にローカル管理下にあります。", inline=False)
-    embed.add_field(name="🧹 5. データの削除とユーザーの権利", value="いつでも `/reset` コマンドで自身の会話履歴を**即座に完全削除**できます。削除後、復元はできません。", inline=False)
-    embed.add_field(name="📬 6. お問い合わせ", value="プライバシーに関するご質問は、作成者[@hurisan_2006]までDMでお知らせください。", inline=False)
-    embed.add_field(name="🔗 7. 各プライバシーポリシー", value="このBotはMiMoAPIとtavilyAPIを使用します。プライバシーポリシーは以下のリンクから確認できます。\n - Xiaomi-MiMoAPI https://privacy.mi.com/XiaomiMiMoPlatform/en_GB/ \n - tavilyAPI https://www.tavily.com/privacy", inline=False)
-
-    embed.set_footer(text="Powered by mimo (Xiaomi) | Developer: @hurisan_2006")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
 @bot.tree.command(name="ping", description="🏓 Botの応答速度を確認します")
 async def ping_cmd(interaction: discord.Interaction):
-    await interaction.response.send_message(f"🏓 ぽんっ！ 生きてるよ！\nWebSocket疎通速度: {bot.latency * 1000:.0f}ms")
+    await interaction.response.send_message(f"🏓 ぽんっ！ 生きてるよ！\nWebSocket疎通速度: `{bot.latency * 1000:.0f}ms`", ephemeral=True)
 
 @bot.tree.command(name="setchannel", description="📡 このチャンネルをAI専用チャンネルに設定します（管理者のみ）")
 @discord.app_commands.checks.has_permissions(administrator=True)
 async def setchannel_cmd(interaction: discord.Interaction):
     update_setting(interaction.guild.id, channel_id=interaction.channel.id)
-    await interaction.response.send_message("✅ AI専用チャンネルをここに設定しました！")
+    await interaction.response.send_message("✅ AI専用チャンネルをここに設定しました！", ephemeral=True)
 
-@bot.tree.command(name="reset", description="🧹 自分の会話履歴をリセットします")
+@bot.tree.command(name="clear", description="🧹 自分の会話履歴をリセットします")
 async def reset_cmd(interaction: discord.Interaction):
     conv_key = f"{interaction.channel.id}:{interaction.user.id}"
     task = running_tasks.get(conv_key)
@@ -292,7 +193,7 @@ async def reset_cmd(interaction: discord.Interaction):
         task.cancel()
         await asyncio.sleep(0.05)
     clear_history(conv_key)
-    await interaction.response.send_message("🧹 履歴をクリアし、処理中の応答を中断しました。", ephemeral=False)
+    await interaction.response.send_message("🧹 あなたの履歴をクリアし、処理中の応答を中断しました。", ephemeral=True)
 
 @bot.tree.command(name="stop", description="🛑 現在のAI応答を中断します")
 async def stop_cmd(interaction: discord.Interaction):
@@ -309,15 +210,13 @@ async def stop_cmd(interaction: discord.Interaction):
 async def stopall_cmd(interaction: discord.Interaction):
     global _emergency_stop
     _emergency_stop = True
-    
     canceled = 0
     for k, t in list(running_tasks.items()):
         if t and not t.done():
             t.cancel()
             canceled += 1
     running_tasks.clear()
-    
-    await interaction.response.send_message(f"🚨 緊急停止を発動しました。{canceled}件の処理を中断し、新規受付を一時停止しました。")
+    await interaction.response.send_message(f"🚨 緊急停止を発動しました。`{canceled}`件の処理を中断し、新規受付を一時停止しました。")
     asyncio.create_task(_reset_emergency_stop())
 
 async def _reset_emergency_stop():
@@ -330,39 +229,82 @@ async def _reset_emergency_stop():
 async def handle_user_message(message, conv_key, custom_instruction):
     try:
         async with message.channel.typing():
-            check_res = await mimo_client.chat.completions.create(
-                model=MIMO_MODEL,
-                messages=[{"role": "user", "content": f"最新情報が必要？(SEARCH_NEEDED/SEARCH_NOT_NEEDED): {message.content}"}],
-                temperature=0
-            )
-            search_data = ""
-            if "SEARCH_NEEDED" in check_res.choices[0].message.content:
-                search_data = await asyncio.to_thread(search_with_tavily, message.content)
+            # 🖼️ 画像添付のチェック
+            image_attachments = [att for att in message.attachments if att.content_type and att.content_type.startswith('image/')]
             
+            # ユーザーメッセージの構築（テキストのみ or テキスト+画像）
+            user_content = message.content
+            if image_attachments:
+                att = image_attachments[0]  # 複数画像が来てもまずは1枚目だけ処理
+                b64_image = await download_and_encode_image(att.url)
+                if b64_image:
+                    user_content = [
+                        {"type": "text", "text": message.content or "この画像について教えてください。"},
+                        {"type": "image_url", "image_url": {"url": f"data:{att.content_type};base64,{b64_image}"}}
+                    ]
+
+            # 🔍 検索判定（画像がある場合はスキップしてAPIの負荷と混乱を防ぐ）
+            search_data = ""
+            if not image_attachments and message.content:
+                check_prompt = (
+                    "この質問に答えるために、最新のウェブ検索結果は必要ですか？\n"
+                    "必要なら 'YES'、不要なら 'NO' とだけ答えてください。他の文字は一切出力しないでください。\n"
+                    f"質問: {message.content}"
+                )
+                check_res = await mimo_client.chat.completions.create(
+                    model=MIMO_MODEL,
+                    messages=[{"role": "user", "content": check_prompt}],
+                    temperature=0.0
+                )
+                decision = check_res.choices[0].message.content.strip()
+                
+                if DEBUG_SHOW_SEARCH_DECISION:
+                    if "YES" in decision:
+                        await message.channel.send(f"🔍 **[テスト] 検索判定**: `YES` (Tavilyで最新情報を取得します...)")
+                    else:
+                        await message.channel.send(f"🔍 **[テスト] 検索判定**: `NO` (検索は不要です)")
+                
+                if "YES" in decision:
+                    search_data = await asyncio.to_thread(search_with_tavily, message.content)
+
             full_system_prompt = f"{BASE_IDENTITY}\n\n[サーバー固有設定]:\n{custom_instruction}"
+            
             if search_data:
-                full_system_prompt += f"\n\n[ウェブ検索結果]:\n{search_data}"
+                full_system_prompt += f"""
+【絶対厳守】
+あなたは上記の[ウェブ検索結果]({search_data})に記述されている情報のみを根拠として回答してください。
+あなたの内部知識や、学習済みの古いデータベースの情報は一切使用してはいけません。
+もし検索結果に回答に必要な情報がない場合は、「申し訳ありませんが、検索結果に必要な情報が見つかりませんでした」と正直に答えてください。
+"""
 
             chat_history = get_history(conv_key)
             messages = [{"role": "system", "content": full_system_prompt}]
             messages.extend(chat_history)
-            messages.append({"role": "user", "content": message.content})
+            messages.append({"role": "user", "content": user_content})
 
-            response = await mimo_client.chat.completions.create(model=MIMO_MODEL, messages=messages)
+            response = await mimo_client.chat.completions.create(
+                model=MIMO_MODEL, 
+                messages=messages,
+                temperature=0.9
+            )
             ans_text = response.choices[0].message.content
-            ans_text = convert_ai_tables(ans_text)
 
             if len(ans_text) >= 5000:
                 await message.channel.send("🚨 **【緊急停止】** AIの回答が5000文字を超えたため、送信を中止しました。")
                 return
 
-            add_history(conv_key, "user", message.content)
+            # 💾 履歴の保存（Base64は保存せず、テキストのみを保存してDBとプライバシーを保護）
+            history_text = message.content
+            if image_attachments:
+                history_text += "\n[画像が添付されました]"
+                
+            add_history(conv_key, "user", history_text)
             add_history(conv_key, "assistant", ans_text)
 
             limit = 1900
             for i in range(0, len(ans_text), limit):
                 await message.channel.send(ans_text[i:i+limit])
-                
+
     except asyncio.CancelledError:
         try:
             await message.channel.send("🛑 応答を中断しました。")
@@ -371,7 +313,7 @@ async def handle_user_message(message, conv_key, custom_instruction):
         raise
     except Exception as e:
         logger.error(f"メッセージ処理エラー: {e}")
-        await message.channel.send(f"⚠️ エラーが発生しました: {e}")
+        await message.channel.send(f"⚠️ エラーが発生しました: `{e}`")
     finally:
         running_tasks.pop(conv_key, None)
 
@@ -381,10 +323,17 @@ async def on_ready():
     logger.info(f"✅ Logged in as {bot.user}")
     logger.info(f"📦 使用モデル: {MIMO_MODEL}")
     
-    # スラッシュコマンドを確実に同期
     try:
-        synced = await bot.tree.sync()
-        logger.info(f"🔄 {len(synced)}個のスラッシュコマンドを同期しました")
+        if TEST_GUILD_ID:
+            # 🎯 指定されたサーバーにのみ即座同期（ギルドコマンド）
+            guild = discord.Object(id=TEST_GUILD_ID)
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            logger.info(f"🔄 [{guild.id}] サーバーに {len(synced)}個のコマンドを即座同期しました")
+        else:
+            # 🌍 全サーバーに同期（グローバルコマンド）
+            synced = await bot.tree.sync()
+            logger.info(f"🔄 {len(synced)}個のグローバルコマンドを同期しました")
     except Exception as e:
         logger.error(f"❌ コマンド同期エラー: {e}")
 
@@ -397,14 +346,14 @@ async def on_message(message):
         return
     if _emergency_stop:
         return
-        
+
     conv_key = f"{message.channel.id}:{message.author.id}"
     target_channel_id, custom_instruction = get_server_settings(message.guild.id)
 
     if target_channel_id and str(message.channel.id) != target_channel_id:
         if bot.user not in message.mentions:
             return
-            
+
     task = asyncio.create_task(handle_user_message(message, conv_key, custom_instruction))
     running_tasks[conv_key] = task
     try:
