@@ -32,7 +32,7 @@
 
 ### 1. リポジトリのクローン
 ```bash
-git clone https://github.com/your-username/Xiaomi-MiMoAi-discord.git
+git clone https://github.com/Hurisan0909/MiMoAi-Discord-Bot-Unofficial.git
 cd Xiaomi-MiMoAi-discord
 ```
 
