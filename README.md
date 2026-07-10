@@ -1,47 +1,90 @@
-# Xiaomi-MiMoAi-discord
+# 🤖 Xiaomi-MiMoAi-discord (Mimo Bot)
 
-複数のAPIを使ってるので、APIを取得してください。
+> ⚠️ **免責事項 (Disclaimer)**  
+> 本プロジェクト「Xiaomi-MiMoAi-discord」は、**Xiaomi 社（小米科技）とは一切関係のない、第三者による非公式な開発プロジェクトです。**  
+> 本BotはXiaomi社の公式サポートや保証を受けるものではなく、プロジェクト名およびAPIの利用は、それぞれの利用規約に従い自己責任で行ってください。
 
-1.Xiaomi-MiMoAI-API
-2.Tavily-API
+## 🌟 プロジェクト概要
+「Mimo（ミモ）」は、Xiaomiの **MiMo API** を活用したフレンドリーでユーモアのあるDiscord AI Botです。  
+単なる質問応答だけでなく、最新のウェブ検索や画像認識機能を備え、ユーザーとの楽しい会話や深い対話を実現します。
 
-この二つとdiscord-botのAPIを取得し、python上部にあるAPIに貼り付けして
-サーバーやホスト環境から起動してください。
+## ✨ 主な機能
+- 🧠 **高度な対話とキャラクター性**: MiMo-v2.5モデルを採用。友達のようなフランクで楽しい会話スタイルを基本とします。
+- 🔍 **自動ウェブ検索 (Tavily)**: 最新情報が必要な質問をAIが自動判定し、Tavily APIを使用してリアルタイムのウェブ検索結果をもとに回答します。
+- 🖼️ **画像認識 (Vision)**: 画像を添付して質問可能。画像はBase64エンコードしてAPIに送信します。
+- 🛡️ **プライバシーとセキュリティ重視**: 
+  - 会話履歴は外部クラウドではなく、ローカルのSQLiteデータベースで安全に管理。
+  - **画像データはDBに保存せず、メモリ内処理のみ**でプライバシーを保護。
+  - 管理者向けに緊急停止（`/stopall`）機能を搭載。
+- 🛠️ **サーバーごとのカスタマイズ**: AI専用チャンネルの設定や、サーバー固有の指示（ペルソナ変更など）に対応。
 
+## 🛠️ 技術スタック
+- **Python 3.10+**
+- **discord.py**: Discord Botフレームワーク
+- **OpenAI SDK**: MiMo APIとの通信（OpenAI互換エンドポイント）
+- **Tavily Python SDK**: リアルタイムウェブ検索
+- **SQLite3**: ローカルデータベース（履歴・設定管理）
+- **aiohttp**: 非同期画像ダウンロード
 
-「警告」
-・AiにAiを作らせているので、不具合があるかもしれません。
-・実行時は自己責任でお願いいたします。
+---
 
-## ⚠️ 免責事項
+## 🚀 セットアップガイド
 
-本プロジェクト「Xiaomi-MiMoAi-discord」は、Xiaomi 社（小米科技）とは一切関係のない、第三者による非公式な開発プロジェクトです。
+### 1. リポジトリのクローン
+```bash
+git clone https://github.com/your-username/Xiaomi-MiMoAi-discord.git
+cd Xiaomi-MiMoAi-discord
+```
 
-- 本プロジェクトは Xiaomi 社によって承認、後援、または運営されているものではありません。
-- 「Xiaomi」「MiMoAI」「MIUI」などの名称および商標は、それぞれの所有者に帰属します。
-- 本プロジェクトの利用により生じたいかなる問題についても、開発者は責任を負いかねます。ご利用は自己責任でお願いいたします。
+### 2. 仮想環境の作成と依存パッケージのインストール
+```bash
+# 仮想環境の作成 (推奨)
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
 
-公式情報については、必ず [Xiaomi 公式サイト](https://www.mi.com/) をご確認ください。
+# パッケージのインストール
+pip install discord.py openai tavily-python aiohttp
+```
 
---------------------------------------------
-Since multiple APIs are used, please obtain the APIs.
+### 3. 環境変数の設定
+Pythonファイルを編集し、設定フィードにIDやAPIを設定して下さい。
+```
+> **⚠️ セキュリティ注意**: `Xiaomi-MiMo.py` ファイルは `.gitignore` に追加し、絶対にGitHubにプッシュしないでください。
 
-1. Xiaomi-MiMoAI-API
-2. Tavily-API
+### 4. Botの実行
+```bash
+python Xiaomi-MiMo.py
+```
+※ 特定のサーバーでのみスラッシュコマンドを即座に同期したい場合は、コード内の `TEST_GUILD_ID` にサーバーIDを設定してください。未設定の場合はグローバルコマンドとして全サーバーに同期されます。
 
-Obtain these two APIs along with the Discord bot API, paste them into the API section at the top of the Python script, and launch it from your server or host environment.
+---
 
+## 📖 スラッシュコマンド一覧
 
-“Warning”
-・Since AI is being used to create AI, there may be bugs.
-・Please run at your own risk.
+### 👤 一般ユーザー向け
+| コマンド | 説明 |
+| :--- | :--- |
+| `/help` | 🤖 Botの操作マニュアルを表示します。 |
+| `/ping` | 🏓 Botの応答速度（WebSocket疎通速度）を確認します。 |
+| `/clear` | 🧹 自分の会話履歴をリセットし、処理中の応答を中断します。 |
+| `/stop` | 🛑 現在実行中のAI応答を中断します。 |
+| `/privacy` | 🔒 プライバシーポリシーを表示します。 |
 
-## ⚠️ Disclaimer
+### 🛡️ 管理者向け
+| コマンド | 説明 |
+| :--- | :--- |
+| `/setchannel` | 📡 現在のチャンネルを「AI専用チャンネル」に設定します。 |
+| `/stopall` | 🚨 **【緊急停止】** 全サーバーの処理を即座に停止し、新規受付を15秒間一時停止します。 |
 
-This project "Xiaomi-MiMoAi-discord" is an unofficial, third-party development project and is not affiliated with, endorsed by, or operated by Xiaomi Corporation.
+---
 
-- This project is not approved, sponsored, or operated by Xiaomi Corporation.
-- All trademarks such as "Xiaomi", "MiMoAI", "MIUI", etc. belong to their respective owners.
-- The developer assumes no responsibility for any issues arising from the use of this project. Use at your own risk.
+## 🛡️ プライバシーポリシー
+本Botはユーザーのプライバシー保護に最大限配慮した設計を行っています。
+外部サイト: https://furisan.org/privacy/discord-bot/mimo-privacy.html
 
-For official information, please visit the [official Xiaomi website](https://www.mi.com/).
+---
+
+## 📝 クレジット
+- **Developer**: [@hurisan_2006](https://x.com/Furisan_org)
+- **Powered by**: MiMo (Xiaomi)
+- **Search Engine**: Tavily AI
