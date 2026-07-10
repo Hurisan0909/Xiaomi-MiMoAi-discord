@@ -48,7 +48,6 @@ pip install discord.py openai tavily-python aiohttp
 
 ### 3. 環境変数の設定
 Pythonファイルを編集し、設定フィードにIDやAPIを設定して下さい。
-```
 > **⚠️ セキュリティ注意**: `Xiaomi-MiMo.py` ファイルは `.gitignore` に追加し、絶対にGitHubにプッシュしないでください。
 
 ### 4. Botの実行
